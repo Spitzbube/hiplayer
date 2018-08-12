@@ -2,6 +2,7 @@
 #include "HiPlayerAudio.h"
 
 
+/* _ZN14CHiPlayerAudioC1EP9CDVDClockR16CDVDMessageQueueR12CProcessInfo */
 CHiPlayerAudio::CHiPlayerAudio(CDVDClock *av_clock, CDVDMessageQueue& parent, CProcessInfo &processInfo) 
 : CThread("CHiPlayerAudio"), 
   IDVDStreamPlayerAudio(processInfo), 
@@ -27,6 +28,90 @@ CHiPlayerAudio::CHiPlayerAudio(CDVDClock *av_clock, CDVDMessageQueue& parent, CP
   m_passthrough   = false;
   m_flush         = false;
 
+}
+
+
+CHiPlayerAudio::~CHiPlayerAudio()
+{
+}
+
+
+void CHiPlayerAudio::OnStartup()
+{
+  printf("CHiPlayerAudio::OnStartup\n");
+}
+
+
+void CHiPlayerAudio::OnExit()
+{
+  printf("CHiPlayerAudio::OnExit\n");
+}
+
+
+void CHiPlayerAudio::Process()
+{
+  printf("CHiPlayerAudio::Process\n");
+}
+
+
+bool CHiPlayerAudio::OpenStream(CDVDStreamInfo &hints)
+{
+  printf("CHiPlayerAudio::OpenStream\n");
+}
+
+
+
+bool CHiPlayerAudio::HasData() const
+{
+  printf("CHiPlayerAudio::HasData\n");
+}
+
+
+bool CHiPlayerAudio::IsEOS()
+{
+  printf("CHiPlayerAudio::IsEOS\n");
+}
+
+
+void CHiPlayerAudio::CloseStream(bool bWaitForBuffers)
+{
+  printf("CHiPlayerAudio::CloseStream\n");
+}
+
+
+void CHiPlayerAudio::Flush(bool sync)
+{
+  printf("CHiPlayerAudio::Flush\n");
+}
+
+
+bool CHiPlayerAudio::IsPassthrough() const
+{
+  printf("CHiPlayerAudio::IsPassthrough\n");
+}
+
+
+void CHiPlayerAudio::SetSpeed(int iSpeed)
+{
+  printf("CHiPlayerAudio::SetSpeed\n");
+}
+
+
+int  CHiPlayerAudio::GetAudioBitrate()
+{
+  printf("CHiPlayerAudio::GetAudioBitrate\n");
+}
+
+
+int CHiPlayerAudio::GetAudioChannels()
+{
+  printf("CHiPlayerAudio::GetAudioChannels\n");
+}
+
+
+std::string CHiPlayerAudio::GetPlayerInfo()
+{
+  printf("CHiPlayerAudio::GetPlayerInfo\n");
 }
 
 
