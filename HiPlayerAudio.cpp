@@ -7,8 +7,10 @@
 #include <iostream>
 #include <sstream>
 
+#include "settings/AdvancedSettings.h"
 #include "utils/MathUtils.h"
 #include "utils/log.h"
+#include "DVDCodecs/DVDCodecs.h"
 #include "DVDDemuxers/DVDDemuxUtils.h"
 #include "cores/AudioEngine/AEFactory.h"
 #include "cores/DataCacheCore.h"
@@ -16,21 +18,66 @@
 #include "HiPlayerAudio.h"
 
 
-class COMXMsgAudioCodecChange : public CDVDMsg
+static uint8_t DefaultAACHeader[] = {0xff, 0xf1, 0x50, 0x80, 0x00, 0x1f, 0xfc};
+
+class CHisiMsgAudioCodecChange : public CDVDMsg
 {
 public:
-  COMXMsgAudioCodecChange(const CDVDStreamInfo &hints, CDVDAudioCodecHisi* codec)
+  CHisiMsgAudioCodecChange(const CDVDStreamInfo &hints, CDVDAudioCodecHisi* codec)
     : CDVDMsg(GENERAL_STREAMCHANGE)
     , m_codec(codec)
     , m_hints(hints)
   {}
- ~COMXMsgAudioCodecChange()
+ ~CHisiMsgAudioCodecChange()
   {
     delete m_codec;
   }
   CDVDAudioCodecHisi   *m_codec;
   CDVDStreamInfo      m_hints;
 };
+
+
+
+
+CHiPlayerAudio::CHiPlayerAudio(CDVDClock *av_clock, CDVDMessageQueue& parent, CProcessInfo &processInfo) 
+: CThread("CHiPlayerAudio"), 
+  IDVDStreamPlayerAudio(processInfo), 
+  m_messageQueue("audio"), 
+  m_messageParent(parent),
+  m_hisiAudio(new CHiAudio())
+{
+  m_av_clock      = av_clock;
+  m_pAudioCodec   = NULL;
+  m_speed         = DVD_PLAYSPEED_NORMAL;
+  m_syncState = IDVDStreamPlayer::SYNC_STARTING;
+  m_stalled       = false;
+  m_audioClock    = DVD_NOPTS_VALUE;
+  m_buffer_empty  = false;
+  m_DecoderOpen   = false;
+  m_bad_state     = false;
+  CThread::m_bStop = false;
+  m_start_pts     = DVD_NOPTS_VALUE;
+  m_bAbortOutput  = false;
+  m_hints_current.Clear();
+  m_messageQueue.SetMaxTimeSize(8.0);
+  m_messageQueue.SetMaxDataSize(6 * 1024 * 1024);
+  m_passthrough   = false;
+  m_flush         = false;
+
+}
+
+
+/* todo */
+CHiPlayerAudio::~CHiPlayerAudio()
+{
+  CloseStream(false);
+
+  if (m_hisiAudio)
+  {
+    delete m_hisiAudio;
+  }
+  m_hisiAudio = NULL;
+}
 
 
 /* complete */
@@ -87,7 +134,7 @@ void CHiPlayerAudio::SetSpeed(int iSpeed)
 /* complete */
 void CHiPlayerAudio::Flush(bool sync)
 {
-  CLog::Log(LOGINFO, "CHiPlayerAudio - Flush, sync: %d", sync);
+  CLog::Log(LOGINFO, "CCHiPlayerAudio - Flush, sync: %d", sync);
 
   m_flush = sync; //true;
   m_messageQueue.Flush();
@@ -152,7 +199,7 @@ bool CHiPlayerAudio::HasData() const
 }
 
 
-/* todo */
+/* complete */
 std::string CHiPlayerAudio::GetPlayerInfo()
 {
   std::ostringstream s;
@@ -204,7 +251,7 @@ bool CHiPlayerAudio::CodecChange()
 }
 
 
-/* todo */
+/* complete */
 void CHiPlayerAudio::WaitForBuffers()
 {
   // make sure there are no more packets available
@@ -270,7 +317,7 @@ AEAudioFormat CHiPlayerAudio::GetDataFormat(CDVDStreamInfo hints)
 }
 
 
-/* todo */
+/* complete */
 void CHiPlayerAudio::OpenStream(CDVDStreamInfo &hints, CDVDAudioCodecHisi *codec)
 {
   SAFE_DELETE(m_pAudioCodec);
@@ -299,7 +346,7 @@ void CHiPlayerAudio::OpenStream(CDVDStreamInfo &hints, CDVDAudioCodecHisi *codec
 }
 
 
-/* todo */
+/* complete */
 bool CHiPlayerAudio::OpenDecoder()
 {
   m_passthrough = false;
@@ -341,7 +388,7 @@ bool CHiPlayerAudio::OpenDecoder()
   
   if(!bAudioRenderOpen)
   {
-    CLog::Log(LOGERROR, "OMXPlayerAudio : Error open audio output");
+    CLog::Log(LOGERROR, "CHiPlayerAudio : Error open audio output");
     m_hisiAudio->close();
   }
   else
@@ -361,10 +408,10 @@ bool CHiPlayerAudio::Decode(DemuxPacket *pkt, bool bDropPacket, bool bTrickPlay)
     return false;
 
   bool settings_changed = false;
-  const uint8_t *data_dec = pkt->pData; //r9
-  int            data_len = pkt->iSize; //r7
-  double dts = pkt->dts; //sp8
-  double pts = pkt->pts; //sp16
+  uint8_t *data_dec = pkt->pData;
+  int data_len = pkt->iSize;
+  double dts = pkt->dts;
+  double pts = pkt->pts;
 
   if(CodecChange())
   {
@@ -378,22 +425,18 @@ bool CHiPlayerAudio::Decode(DemuxPacket *pkt, bool bDropPacket, bool bTrickPlay)
   if (bTrickPlay)
   {
     settings_changed = true;
-    //->13c8
   }
   else if(m_format.m_dataFormat != AE_FMT_RAW && !bDropPacket)
   {
-    //122c
-    while(!m_bStop && data_len > 0 && !m_bAbortOutput)
+    while(!m_bStop && !m_bAbortOutput && data_len > 0)
     {
-      //1274
       int len = m_pAudioCodec->Decode((BYTE *)data_dec, data_len, dts, pts);
       if( (len < 0) || (len >  data_len) )
       {
         m_pAudioCodec->Reset();
         break;
-        //->13c8
       }
-      //12a0
+
       data_dec += len;
       data_len -= len;
       
@@ -403,134 +446,84 @@ bool CHiPlayerAudio::Decode(DemuxPacket *pkt, bool bDropPacket, bool bTrickPlay)
       if(decoded_size <=0)
         continue;
 
-      //int ret = 0;
-
       m_audioStats.AddSampleBytes(decoded_size);
-      //12d4
+
       if (pts != DVD_NOPTS_VALUE)
       {
-        if ((pts < m_audioClock) && (m_audioClock != DVD_NOPTS_VALUE))
+        if ((m_audioClock != DVD_NOPTS_VALUE) && (pts < m_audioClock))
         {
-          //14c4?
           CLog::Log(LOGDEBUG, "CHiPlayerAudio package need drop, seek pts:%f, package pts:%f", m_audioClock, pts);
-        
-          if ((m_start_pts == DVD_NOPTS_VALUE) && (pts != DVD_NOPTS_VALUE))
-          {
-            //1328
-            m_start_pts = pts;
-          }          
-        }
-        else
-        {
-          //1314
-          if (m_start_pts == DVD_NOPTS_VALUE)
-          {
-            //1328
-            m_start_pts = pts;
-          }
         }
       }
-      //132c
+
+      if ((m_start_pts == DVD_NOPTS_VALUE) && (pts != DVD_NOPTS_VALUE))
+      {
+        m_start_pts = pts;
+      }          
+
       while(!m_bStop && !m_bAbortOutput)
       {
         if (!m_hisiAudio->Full())
         {
           if (m_hisiAudio->Push(decoded, decoded_size, pts / 1000.0))
           {
-            //->14b4
             m_audioClock = pts;
-            //->1238
             break;
           }
         }
-        //138c
+
         Sleep(10);
-        //->132c
       }
-      //->1238
     }
-    //->13c8
   }
   else if(!bDropPacket)
   {
-    //13a4
-    while(!m_bStop)
+    if (!m_bStop && !m_bAbortOutput && !m_flush)
     {
-      //1510
-      if (m_bAbortOutput || m_flush)
-      {
-        //->13b8
-        break;
-      }
-      //1530
-      uint8_t *r9/*pData*/ = pkt->pData; //r9
-      int      r7/*iSize*/ = pkt->iSize; //r7
+      data_len = pkt->iSize;
+      data_dec = pkt->pData;
 
-      if (r9)
+      if (data_dec)
       {
-        //1540
         AVPacket avpkt;
         av_init_packet(&avpkt);
-        avpkt.data = r9;
-        avpkt.size = r7;
+        avpkt.data = data_dec;
+        avpkt.size = data_len;
         int didSplit = av_packet_split_side_data(&avpkt);
         if (didSplit)
         {
-          //167c
-          r9 = avpkt.data;
-          r7 = avpkt.size;
+          data_dec = avpkt.data;
+          data_len = avpkt.size;
           av_packet_free_side_data(&avpkt);
         }
       }
-      //1564
-#if 1
-      uint8_t bla[] = {0xff, 0xf1, 0x50, 0x80, 0x00, 0x1f, 0xfc};
-      uint8_t* r6 = (uint8_t*) malloc(7); 
-      memcpy(r6, bla, 7);
-#else
-      struct
-      {
-        char bData_0;
-        char bData_1;
-        char bData_2;
-        char bData_3_bit8: 1;
-        unsigned bData_3_rest: 18;
-        unsigned rest: 12;
-      } bla = {0xff, 0xf1, 0x50, 1, r7 + 7, 0x1ffc};
-      
-//      bla.bData_3_rest = r7 + 7;
 
-      //uint8_t* r6 = (char*) malloc(7);
-      //r6 = bla; 
-#endif
+      uint8_t* extra_data = (uint8_t*) malloc(sizeof(DefaultAACHeader)); 
+      memcpy(extra_data, DefaultAACHeader, sizeof(DefaultAACHeader));
+      int r7_ = data_len + sizeof(DefaultAACHeader);
+      extra_data[3] |= (r7_ >> 12) & 0x03;
+      extra_data[4] = (r7_ >> 3) & 0xFF;
+      extra_data[5] |=  (r7_ << 5) & 0xE0;
 
-      //->1664
       while (!m_bAbortOutput)
       {
-        //15e8
         if (!m_hisiAudio->Full())
         {
-          //1600
-          if ((m_hisiAudio->PushEx((uint8_t*)r6, 7, pkt->pts / 1000.0, /*continues*/false, /*last*/false)) &&
-            (m_hisiAudio->PushEx(r9, r7, pkt->pts / 1000.0, /*continues*/true, /*last*/true)))
+          if (m_hisiAudio->PushEx(extra_data, sizeof(DefaultAACHeader), pkt->pts / 1000.0, /*continues*/false, /*last*/false) &&
+              m_hisiAudio->PushEx(data_dec, data_len, pkt->pts / 1000.0, /*continues*/true, /*last*/true))
           {
-            //->13b8
             break;
           }
         }
-        //1658
         Sleep(10);
       }
-      //->13b8
-      break;
     }
-    //13b8
+
     m_audioStats.AddSampleBytes(pkt->iSize);
   }
-  //13c8
+
   if (m_syncState == IDVDStreamPlayer::SYNC_STARTING && !bDropPacket && (m_start_pts != DVD_NOPTS_VALUE))
   {
-    //->1418
     SStartMsg msg;
     msg.player = VideoPlayer_AUDIO;
     msg.cachetotal = DVD_SEC_TO_TIME(m_hisiAudio->CacheTotal());
@@ -542,43 +535,8 @@ bool CHiPlayerAudio::Decode(DemuxPacket *pkt, bool bDropPacket, bool bTrickPlay)
 
     m_syncState = IDVDStreamPlayer::SYNC_WAITSYNC;
   }
-  //13f4
+
   return true;
-}
-
-
-
-/* _ZN14CHiPlayerAudioC1EP9CDVDClockR16CDVDMessageQueueR12CProcessInfo */
-CHiPlayerAudio::CHiPlayerAudio(CDVDClock *av_clock, CDVDMessageQueue& parent, CProcessInfo &processInfo) 
-: CThread("CHiPlayerAudio"), 
-  IDVDStreamPlayerAudio(processInfo), 
-  m_messageQueue("audio"), 
-  m_messageParent(parent),
-  m_hisiAudio(new CHiAudio())
-{
-  m_av_clock      = av_clock;
-  m_pAudioCodec   = NULL;
-  m_speed         = DVD_PLAYSPEED_NORMAL;
-  m_syncState = IDVDStreamPlayer::SYNC_STARTING;
-  m_stalled       = false;
-  m_audioClock    = DVD_NOPTS_VALUE;
-  m_buffer_empty  = false;
-  m_DecoderOpen   = false;
-  m_bad_state     = false;
-  CThread::m_bStop = false;
-  m_start_pts     = DVD_NOPTS_VALUE;
-  m_bAbortOutput  = false;
-  m_hints_current.Clear();
-  m_messageQueue.SetMaxTimeSize(8.0);
-  m_messageQueue.SetMaxDataSize(6 * 1024 * 1024);
-  m_passthrough   = false;
-  m_flush         = false;
-
-}
-
-
-CHiPlayerAudio::~CHiPlayerAudio()
-{
 }
 
 
@@ -638,7 +596,7 @@ void CHiPlayerAudio::Process()
         // we are not running until something is cached in output device
         if(m_stalled && m_hisiAudio->CacheTime() > 0.0)
         {
-          CLog::Log(LOGINFO, "COMXPlayerAudio - Switching to normal playback");
+          CLog::Log(LOGINFO, "CCHiPlayerAudio - Switching to normal playback");
           m_stalled = false;
         }
       }
@@ -646,14 +604,14 @@ void CHiPlayerAudio::Process()
     else if (pMsg->IsType(CDVDMsg::GENERAL_SYNCHRONIZE)) //1006
     {
       if(((CDVDMsgGeneralSynchronize*)pMsg)->Wait( 100, SYNCSOURCE_AUDIO ))
-        CLog::Log(LOGDEBUG, "COMXPlayerAudio - CDVDMsg::GENERAL_SYNCHRONIZE");
+        CLog::Log(LOGDEBUG, "CCHiPlayerAudio - CDVDMsg::GENERAL_SYNCHRONIZE");
       else
         m_messageQueue.Put(pMsg->Acquire(), 1); /* push back as prio message, to process other prio messages */
     }
     else if (pMsg->IsType(CDVDMsg::GENERAL_RESYNC)) //1001
     { //player asked us to set internal clock
       double pts = static_cast<CDVDMsgDouble*>(pMsg)->m_value;
-      CLog::Log(LOGDEBUG, "COMXPlayerAudio - CDVDMsg::GENERAL_RESYNC(%f)", pts);
+      CLog::Log(LOGDEBUG, "CCHiPlayerAudio - CDVDMsg::GENERAL_RESYNC(%f)", pts);
 
       m_start_pts = DVD_NOPTS_VALUE; //0;
       m_audioClock = pts;
@@ -663,7 +621,7 @@ void CHiPlayerAudio::Process()
     }
     else if (pMsg->IsType(CDVDMsg::GENERAL_RESET)) //1003
     {
-      CLog::Log(LOGDEBUG, "COMXPlayerAudio - CDVDMsg::GENERAL_RESET");
+      CLog::Log(LOGDEBUG, "CCHiPlayerAudio - CDVDMsg::GENERAL_RESET");
       m_syncState = IDVDStreamPlayer::SYNC_STARTING;
       m_audioClock = 0; //DVD_NOPTS_VALUE;
       m_pAudioCodec->Reset();
@@ -671,7 +629,7 @@ void CHiPlayerAudio::Process()
     else if (pMsg->IsType(CDVDMsg::GENERAL_FLUSH)) //1002
     {
       bool sync = static_cast<CDVDMsgBool*>(pMsg)->m_value;
-      CLog::Log(LOGDEBUG, "COMXPlayerAudio - CDVDMsg::GENERAL_FLUSH(%d, %f)", sync, m_start_pts);
+      CLog::Log(LOGDEBUG, "CCHiPlayerAudio - CDVDMsg::GENERAL_FLUSH(%d), m_start_pts:%f", sync, m_start_pts);
 
       m_stalled   = true;
       m_syncState = IDVDStreamPlayer::SYNC_STARTING;
@@ -684,7 +642,7 @@ void CHiPlayerAudio::Process()
     }
     else if (pMsg->IsType(CDVDMsg::GENERAL_EOF)) //1008
     {
-      CLog::Log(LOGDEBUG, "COMXPlayerAudio - CDVDMsg::GENERAL_EOF");
+      CLog::Log(LOGDEBUG, "CCHiPlayerAudio - CDVDMsg::GENERAL_EOF");
       m_hisiAudio->SubmitEos();
     }
     else if (pMsg->IsType(CDVDMsg::PLAYER_SETSPEED)) //1017
@@ -692,13 +650,13 @@ void CHiPlayerAudio::Process()
       if (m_speed != static_cast<CDVDMsgInt*>(pMsg)->m_value)
       {
         m_speed = static_cast<CDVDMsgInt*>(pMsg)->m_value;
-        CLog::Log(LOGDEBUG, "COMXPlayerAudio - CDVDMsg::PLAYER_SETSPEED %d", m_speed);
+        CLog::Log(LOGDEBUG, "CCHiPlayerAudio - CDVDMsg::PLAYER_SETSPEED %d", m_speed);
       }
     }
     else if (pMsg->IsType(CDVDMsg::GENERAL_STREAMCHANGE)) //1005
     {
-      COMXMsgAudioCodecChange* msg(static_cast<COMXMsgAudioCodecChange*>(pMsg));
-      CLog::Log(LOGDEBUG, "COMXPlayerAudio - CDVDMsg::GENERAL_STREAMCHANGE");
+      CHisiMsgAudioCodecChange* msg(static_cast<CHisiMsgAudioCodecChange*>(pMsg));
+      CLog::Log(LOGDEBUG, "CCHiPlayerAudio - CDVDMsg::GENERAL_STREAMCHANGE");
       OpenStream(msg->m_hints, msg->m_codec);
       msg->m_codec = NULL;
     }
@@ -744,39 +702,41 @@ void CHiPlayerAudio::SubmitEOS()
 }
 
 
-
+/* todo */
 bool CHiPlayerAudio::OpenStream(CDVDStreamInfo &hints)
 {
   m_bad_state = false;
 
   m_processInfo.ResetAudioCodecInfo();
 
-  if (m_processInfo.AllowDTSHDDecode())
+  CDVDCodecOptions options;
+  if (!m_processInfo.AllowDTSHDDecode())
   {
-    printf("todo");
+    options.m_keys.push_back(CDVDCodecOption("allowdtshddecode", "0"));
   }
 
-
-#if 0
-  COMXAudioCodecOMX *codec = new COMXAudioCodecOMX(m_processInfo);
-
-  if(!codec || !codec->Open(hints))
+  CDVDAudioCodecHisi* pCodec = new CDVDAudioCodecHisi(m_processInfo);
+  if (!pCodec->Open(hints))
   {
     CLog::Log(LOGERROR, "Unsupported audio codec");
-    delete codec; codec = NULL;
+
+    delete pCodec; pCodec = NULL;
     return false;
   }
 
-  if(m_messageQueue.IsInited())
-    m_messageQueue.Put(new COMXMsgAudioCodecChange(hints, codec), 0);
+  if (m_messageQueue.IsInited())
+  {
+    m_messageQueue.Put(new CHisiMsgAudioCodecChange(hints, pCodec), 0);
+  }
   else
   {
-    OpenStream(hints, codec);
+    OpenStream(hints, pCodec);
     m_messageQueue.Init();
+
     CLog::Log(LOGNOTICE, "Creating audio thread");
+
     Create();
   }
-#endif
 
   return true;
 }

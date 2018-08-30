@@ -1,5 +1,4 @@
 
-##OBJS  = HiPlayerAudio.o
 SRCS  = HiPlayerAudio.cpp
 SRCS += HiPlayerVideo.cpp
 SRCS += HiCodecAudio.cpp
