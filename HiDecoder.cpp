@@ -135,7 +135,11 @@ bool HisiAvDecoder::Init()
     res = HI_UNF_AVPLAY_RegisterEvent64(m_hAvplay, enEvent, AVEventReport);
     if (res != HI_SUCCESS)
     {
+#if 0
       goto label_2fc;
+#else
+      CLog::Log(LOGERROR, "HI_UNF_AVPLAY_RegisterEvent64 failed (0x%x) for enEvent %d", res, enEvent);
+#endif
     } 
     enEvent = (HI_UNF_AVPLAY_EVENT_E)((int)enEvent + 1);
   }
